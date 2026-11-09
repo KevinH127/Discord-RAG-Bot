@@ -1,0 +1,111 @@
+// Discord RAG Bot: Postgres schema (pgvector/pgvector:pg17).
+// Paste into https://dbdiagram.io to view the diagram.
+//
+// One database holds two groups of tables:
+//   knowledge base   chunks, written by RAG_ENGINE/ingestion (python -m RAG_ENGINE.ingestion.ingest)
+//   conversations    sessions, turns, context, written by RAGEngine.ask()
+
+Project discord_rag_bot {
+  database_type: 'PostgreSQL'
+  Note: 'Knowledge-base chunks plus a log of every member session, question and bot reply.'
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge base (reference only: created by ensure_schema() in
+// RAG_ENGINE/ingestion/store.py, which stays the source of truth because the
+// vector size comes from EMBED_DIM)
+// ---------------------------------------------------------------------------
+
+Table chunks {
+  id           bigserial     [pk]
+  source_file  text          [not null, note: 'File name in KNOWLEDGE_BASE/']
+  doc_title    text          [not null]
+  question     text          [not null, note: 'The ## heading the chunk was cut from']
+  content      text          [not null]
+  metadata     jsonb         [not null, default: `'{}'`]
+  content_hash text          [not null, note: 'Skips re-embedding unchanged chunks']
+  embedding    "vector(768)" [not null, note: 'Size = EMBED_DIM']
+  tsv          tsvector      [note: "GENERATED ALWAYS AS (to_tsvector('english', content)) STORED"]
+  updated_at   timestamptz   [not null, default: `now()`]
+
+  indexes {
+    (source_file, question) [unique]
+    embedding [type: hnsw, note: 'vector_cosine_ops']
+    tsv       [type: gin]
+  }
+
+  Note: 'Upserted on every ingest (id is kept for an unchanged question) and deleted when a question or file is removed.'
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+// ---------------------------------------------------------------------------
+
+Enum intent {
+  "answer"    [note: 'Answered from the knowledge base']
+  "follow-up" [note: 'Trevona-related, but more information is needed']
+  "handoff"   [note: 'A request for the team to do something']
+  "off-topic" [note: 'Not about Trevona ACO']
+}
+
+Table sessions {
+  id              uuid        [pk, default: `gen_random_uuid()`, note: 'RAGEngine.session_id']
+  discord_user_id text        [not null, note: 'Discord snowflake, kept as text']
+  channel_id      text        [note: 'Discord channel or thread; null for terminal sessions']
+  created_at      timestamptz [not null, default: `now()`]
+  last_active_at  timestamptz [not null, default: `now()`, note: 'Bumped on every turn']
+  ended_at        timestamptz [note: 'Null while the session is open']
+
+  indexes {
+    (discord_user_id, last_active_at) [name: 'sessions_user_active_idx', note: "Find a user's latest session"]
+    (channel_id, last_active_at)      [name: 'sessions_channel_active_idx']
+  }
+
+  Note: 'One conversation. Its turns are replayed as chat history on every message.'
+}
+
+Table turns {
+  id                    bigserial   [pk]
+  session_id            uuid        [not null]
+  context_id            uuid        [not null, unique, default: `gen_random_uuid()`, note: 'Groups the context rows retrieved for this turn']
+  turn_index            integer     [not null, note: '0, 1, 2... order within the session']
+  user_message          text        [not null, note: 'What the member sent']
+  verified_user_message text        [not null, note: 'Standalone rewrite that was searched (LLM call 1)']
+  reason                text        [not null, note: "The model's one-line explanation of the intent"]
+  intent                intent      [not null]
+  bot_message           text        [not null, note: 'The reply sent in Discord']
+  contact_admin         boolean     [not null, note: 'Support should follow up with the member']
+  llm_model             text        [not null, note: 'LLM_MODEL used for the answer (call 2)']
+  verifier_model        text        [not null, note: 'VERIFIER_MODEL used for the rewrite (call 1)']
+  latency_ms            integer     [note: 'Time from message received to reply ready']
+  created_at            timestamptz [not null, default: `now()`]
+
+  indexes {
+    (session_id, turn_index) [unique]
+    created_at
+    (intent, created_at)
+  }
+
+  Note: 'One member message and the bot reply to it (one EngineReply).'
+}
+
+Table context {
+  context_id  uuid    [not null]
+  rank        integer [not null, note: '1 = most similar']
+  chunk_id    bigint  [note: 'Set to null if the chunk is later deleted from the knowledge base']
+  source_file text    [not null, note: 'Copied from the chunk so the row still makes sense if chunk_id goes null']
+  question    text    [not null, note: 'Copied from the chunk, as above']
+  similarity  real    [not null, note: 'Cosine similarity, 1.0 = identical direction']
+
+  indexes {
+    (context_id, rank) [pk]
+    chunk_id [note: 'How often each chunk is used; also speeds up the ON DELETE SET NULL']
+  }
+
+  Note: 'The chunks retrieved for a turn and handed to the LLM. No rows when nothing relevant was found.'
+}
+
+Ref: turns.session_id > sessions.id [delete: cascade]
+Ref: context.context_id > turns.context_id [delete: cascade]
+// SET NULL so ingest can still delete removed questions and files.
+Ref: context.chunk_id > chunks.id [delete: set null]
