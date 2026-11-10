@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -65,13 +66,16 @@ class RAGEngine:
         self,
         session_id: str | None = None,
         *,
-        conn: psycopg.Connection    | None = None,
+        conn: psycopg.Connection | None = None,
+        history: Sequence[ChatTurn] = (),
     ) -> None:
         self.session_id = session_id or uuid.uuid4().hex
         # Every turn is kept and sent with each message for the life of the session.
         # Each turn adds roughly 50-300 tokens to both LLM prompts; helpers/context_window.py
         # logs a warning as a prompt nears LLM_NUM_CTX or gets cut by Ollama.
-        self.history: list[ChatTurn] = []
+        # `history` seeds a session whose earlier turns are stored elsewhere (api.py
+        # rebuilds each session from the Discord history the caller sends).
+        self.history: list[ChatTurn] = list(history)
         self.created_at = self.last_active = datetime.now(EASTERN)
         # A shared connection is left open on close(); one this session opened itself is closed.
         self._conn = conn

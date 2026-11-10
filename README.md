@@ -106,7 +106,39 @@ question, embeds each chunk and stores it in pgvector.
 .venv/bin/python -m RAG_ENGINE.main
 ```
 
-**From code** (e.g. the Discord bot): keep one `RAGEngine` per user and share a database
+**Serve it to the Discord ticket bot over HTTP.** The ticket bot (Node.js,
+ticket-renamer-bot) keeps the Discord connection and the ticket rules, and calls this API
+for each reply:
+
+```bash
+.venv/bin/python -m RAG_ENGINE.api          # http://127.0.0.1:8765 (API_HOST / API_PORT)
+```
+
+The API is stateless: each request carries the conversation the bot re-read from Discord,
+so a restart of either side loses nothing.
+
+```bash
+curl -s localhost:8765/health
+curl -s localhost:8765/ask -H 'Content-Type: application/json' -d '{
+  "message": "walmart",
+  "history": [{"user_message": "how much is the aco fee?", "bot_message": "Which retailer?"}],
+  "session_id": "0273"
+}'
+# -> {"intent": "answer", "message": "...", "contact_admin": false, "reason": "...",
+#     "verified_user_message": "...", "model": "gemma4:e2b", "sources": [...]}
+```
+
+Errors return `{"error": "..."}` with 400 (bad request), 413 (body over 64 KB), 502 (Ollama
+rejected the call), 503 (Postgres or Ollama unreachable) or 500. The API has no
+authentication, so it listens on loopback only unless `API_HOST` says otherwise.
+
+Tests (no Postgres or Ollama needed):
+
+```bash
+.venv/bin/python -m unittest discover -s tests -t . -v
+```
+
+**From code** (e.g. a Python Discord bot): keep one `RAGEngine` per user and share a database
 connection between them.
 
 ```python
@@ -149,6 +181,7 @@ All settings come from `.env` (see `.env.example`). Real environment variables o
 | `LLM_TEMPERATURE` | `0` | 0 gives the same reply for the same input |
 | `LLM_NUM_CTX` | `16384` | context window in tokens, shared by both calls |
 | `LLM_THINK`, `VERIFIER_THINK` | `false` | thinking for models that support it; `true` errors on models that don't |
+| `API_HOST`, `API_PORT` | `127.0.0.1`, `8765` | where `RAG_ENGINE.api` listens |
 
 Changing `EMBED_MODEL` to one with a different dimension also requires dropping the
 `chunks` table and re-ingesting. If a prompt approaches `LLM_NUM_CTX` (very long sessions),
@@ -160,6 +193,7 @@ a warning is logged; past the limit Ollama silently drops the start of the promp
 RAG_ENGINE/
   config.py               settings loaded from .env
   main.py                 RAGEngine (one per session) + terminal chat
+  api.py                  HTTP API for the Discord ticket bot (POST /ask, GET /health)
   ingestion/              chunker, embedder, pgvector store, ingest CLI
   retrieval/              question rewrite (LLM call 1), vector search
   augmentation/           system prompt, examples, JSON payload

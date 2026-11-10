@@ -59,5 +59,10 @@ LLM_THINK = _think(os.environ.get("LLM_THINK", "false"))
 # rewrite model keeps working when LLM_THINK is on.
 VERIFIER_MODEL = os.environ.get("VERIFIER_MODEL") or LLM_MODEL
 VERIFIER_THINK = _think(os.environ.get("VERIFIER_THINK", "false"))
+
+# HTTP API (api.py) that the Discord ticket bot calls. It has no authentication,
+# so keep it on the loopback address unless something else guards the port.
+API_HOST = os.environ.get("API_HOST", "127.0.0.1")
+API_PORT = int(os.environ.get("API_PORT", "8765"))
 # Shared by both LLM calls: question rewriting (retrieval) and answering (generation).
 LLM_OPTIONS = {"temperature": LLM_TEMPERATURE, "num_ctx": LLM_NUM_CTX}
